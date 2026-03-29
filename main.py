@@ -2,6 +2,7 @@ import typer
 import time
 import psutil
 import signal
+import threading
 
 from collector.devices import scan_devices
 from collector.bandwidth import get_bandwidth, start_sniff, get_traffic_per_device
@@ -21,8 +22,7 @@ console = Console()
 def status(t: bool = typer.Option(False, "-t", help="Modo contínuo")):
     """Exibe status geral da rede."""
 
-    def build_layout(per_device: dict = {}):
-        devices, detected_network = scan_devices()
+    def build_layout(devices: list, per_device: dict = {}):
         data = get_bandwidth()
         upload_kb = data["upload"] / 1024
         download_kb = data["download"] / 1024
@@ -55,7 +55,7 @@ def status(t: bool = typer.Option(False, "-t", help="Modo contínuo")):
         )
 
         return Columns([table, band_panel])
-
+    
     if t:
         interface = get_bandwidth()["interface"]
         gateway_ip = "192.168.100.1"
@@ -65,25 +65,38 @@ def status(t: bool = typer.Option(False, "-t", help="Modo contínuo")):
                 local_ip = addr.address
                 break
 
-        # inicia spoofing e sniff
+        console.print("[bold]Escaneando dispositivos...[/bold]")
         devices, _ = scan_devices()
         start_spoofing(devices, gateway_ip, interface)
         start_sniff(local_ip, interface)
 
-        console.print("[bold yellow]⚠ ARP Spoofing ativo — IP forwarding habilitado[/bold yellow]")
+        # thread que atualiza dispositivos a cada 30s em background
+        def refresh_devices():
+            nonlocal devices
+            while True:
+                time.sleep(10)
+                new_devices, _ = scan_devices()
+                devices = new_devices
+                start_spoofing(devices, gateway_ip, interface)
+
+        thread = threading.Thread(target=refresh_devices, daemon=True)
+        thread.start()
+
+        console.print("[bold yellow]⚠ ARP Spoofing ativo[/bold yellow]")
         console.print("[bold]Modo contínuo ativado... (Ctrl+C para sair)[/bold]")
         time.sleep(1)
 
         try:
-            with Live(refresh_per_second=1) as live:
+            with Live(refresh_per_second=4) as live:
                 while True:
                     per_device = get_traffic_per_device()
-                    live.update(build_layout(per_device))
+                    live.update(build_layout(devices, per_device))
         except KeyboardInterrupt:
             stop_spoofing()
             console.print("[bold red]Spoofing encerrado, ARP restaurado.[/bold red]")
     else:
-        console.print(build_layout())
+        devices, _ = scan_devices()
+        console.print(build_layout(devices))
 
 @app.command()
 def scan(network: str = None):
