@@ -1,6 +1,9 @@
 import typer
+import time
 from collector.devices import scan_devices
 from collector.bandwidth import get_bandwidth
+from rich.live import Live
+from rich.panel import Panel
 from rich.table import Table
 from rich.console import Console
 
@@ -44,6 +47,25 @@ def bandwidth():
     console.print(f"Interface: [cyan]{data['interface']}[/cyan]")
     console.print(f"Upload:    [red]{upload_kb:.2f} KB/s[/red]")
     console.print(f"Download:  [green]{download_kb:.2f} KB/s[/green]")
+
+@app.command()
+def monitor():
+    """Modo monitoramento contínuo de banda."""
+    console.print("[bold]Iniciando monitoramento... \n(Ctrl+C para sair)[/bold]")
+
+    with Live(refresh_per_second=1) as live:
+        while True:
+            data = get_bandwidth()
+            upload_kb = data["upload"] / 1024
+            download_kb = data["download"] / 1024
+
+            panel = Panel(
+                f"Interface: [cyan]{data['interface']}[/cyan]\n"
+                f"Upload:    [red]{upload_kb:.2f} KB/s[/red]\n"
+                f"Download:  [green]{download_kb:.2f} KB/s[/green]",
+                title="[bold]Monitoramento de Banda[/bold]",
+            )
+            live.update(panel)
 
 if __name__ == "__main__":
     app()
