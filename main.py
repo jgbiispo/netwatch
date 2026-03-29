@@ -1,5 +1,6 @@
 import typer
 from collector.devices import scan_devices
+from collector.bandwidth import get_bandwidth
 from rich.table import Table
 from rich.console import Console
 
@@ -29,6 +30,20 @@ def scan(network: str = None):
         table.add_row(device["ip"], device["mac"], device["vendor"])
 
     console.print(table)
+
+@app.command()
+def bandwidth():
+    """Exibe o uso de banda em tempo real."""
+    console.print("[bold]Medindo uso de banda...[/bold]")
+    
+    data = get_bandwidth()
+
+    upload_kb = data["upload"] / 1024
+    download_kb = data["download"] / 1024
+
+    console.print(f"Interface: [cyan]{data['interface']}[/cyan]")
+    console.print(f"Upload:    [red]{upload_kb:.2f} KB/s[/red]")
+    console.print(f"Download:  [green]{download_kb:.2f} KB/s[/green]")
 
 if __name__ == "__main__":
     app()
