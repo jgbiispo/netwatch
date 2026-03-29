@@ -166,6 +166,20 @@ def get_known_devices(limit: int = 500) -> list:
         return [dict(r) for r in rows]
 
 
+def get_device_history(mac: str) -> dict | None:
+    """
+    Retorna o registro histórico de um dispositivo pelo MAC.
+    Útil para a IA saber se um dispositivo é recorrente ou novo.
+    Retorna None se o dispositivo não tiver histórico.
+    """
+    init_db()
+    with _get_connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM known_devices WHERE mac = ?", (mac.lower(),)
+        ).fetchone()
+        return dict(row) if row else None
+
+
 # ---------------------------------------------------------------------------
 # Comparação / Diff
 # ---------------------------------------------------------------------------

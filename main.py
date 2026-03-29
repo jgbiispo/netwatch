@@ -12,11 +12,11 @@ from collector.history import (
     get_scan_history,
     get_scan_devices,
     get_known_devices,
+    get_device_history,
     diff_with_last_scan,
 )
 from collector.ai import (
-    build_context,
-    analyze,
+    analyze_with_threshold,
     save_api_key,
     is_configured,
 )
@@ -81,25 +81,56 @@ def _print_diff(diff: dict) -> None:
             )
 
 
+def _enrich_devices_for_ai(devices: list) -> list:
+    """
+    Enriquece a lista de dispositivos com dados históricos (times_seen)
+    para a IA ter contexto de baseline e não alucinar sobre dispositivos comuns.
+    """
+    enriched = []
+    for d in devices:
+        record = get_device_history(d.get("mac", ""))
+        enriched_d = dict(d)
+        if record:
+            enriched_d["times_seen"] = record["times_seen"]
+            enriched_d["first_seen"] = record["first_seen"]
+        else:
+            enriched_d["times_seen"] = 0
+        enriched.append(enriched_d)
+    return enriched
+
+
 def _run_ai_analysis(
     devices: list,
     bandwidth: dict = None,
     diff: dict = None,
     per_device: dict = None,
+    gateway_ip: str = None,
     question: str = None,
     title: str = "🤖 Análise de Segurança — DeepSeek",
 ) -> None:
-    """Executa análise IA e exibe resultado como painel Rich."""
+    """Executa análise IA com threshold inteligente e exibe painel Rich."""
     if not is_configured():
         console.print(
             "[dim]💡 IA não configurada. Execute [bold]netwatch setup[/bold] para ativar análises.[/dim]"
         )
         return
 
-    context = build_context(devices, bandwidth, diff, per_device)
+    enriched = _enrich_devices_for_ai(devices)
 
     with Status("[bold cyan]Analisando com IA...[/bold cyan]", spinner="dots", console=console):
-        result = analyze(context, question)
+        result, api_called = analyze_with_threshold(
+            devices=enriched,
+            bandwidth=bandwidth,
+            diff=diff,
+            per_device=per_device,
+            gateway_ip=gateway_ip,
+            question=question,
+        )
+
+    if not api_called:
+        # Rede estável — exibe resultado local sem painel elaborado
+        console.print(f"[dim]{result}[/dim]")
+        return
 
     if result:
         console.print(
@@ -199,6 +230,7 @@ def status(
                 devices,
                 bandwidth=get_bandwidth(),
                 diff=diff,
+                gateway_ip=gateway_ip,
                 title="🤖 Análise Inicial — DeepSeek",
             )
 
@@ -242,6 +274,7 @@ def status(
                 devices,
                 bandwidth=get_bandwidth(),
                 diff=diff,
+                gateway_ip=detect_gateway(),
                 title="🤖 Análise de Segurança — DeepSeek",
             )
 
@@ -300,6 +333,7 @@ def scan(
         _run_ai_analysis(
             devices,
             diff=changes,
+            gateway_ip=detect_gateway(),
             title="🤖 Análise de Segurança — DeepSeek",
         )
 
@@ -327,6 +361,7 @@ def ask(
         devices,
         bandwidth=bandwidth,
         diff=diff,
+        gateway_ip=detect_gateway(),
         question=question,
         title=f"🤖 DeepSeek — \"{question[:60]}\"",
     )
