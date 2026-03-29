@@ -14,16 +14,24 @@ from collector.history import (
     get_known_devices,
     diff_with_last_scan,
 )
+from collector.ai import (
+    build_context,
+    analyze,
+    save_api_key,
+    is_configured,
+)
 from rich.live import Live
 from rich.panel import Panel
 from rich.table import Table
 from rich.console import Console
 from rich.columns import Columns
-from rich.text import Text
+from rich.markdown import Markdown
+from rich.spinner import Spinner
+from rich.status import Status
 from collector.spoof import start_spoofing, stop_spoofing
 
 
-app = typer.Typer()
+app = typer.Typer(help="NetWatch — Monitor e analisador de rede com IA.")
 console = Console()
 
 
@@ -73,11 +81,62 @@ def _print_diff(diff: dict) -> None:
             )
 
 
+def _run_ai_analysis(
+    devices: list,
+    bandwidth: dict = None,
+    diff: dict = None,
+    per_device: dict = None,
+    question: str = None,
+    title: str = "🤖 Análise de Segurança — DeepSeek",
+) -> None:
+    """Executa análise IA e exibe resultado como painel Rich."""
+    if not is_configured():
+        console.print(
+            "[dim]💡 IA não configurada. Execute [bold]netwatch setup[/bold] para ativar análises.[/dim]"
+        )
+        return
+
+    context = build_context(devices, bandwidth, diff, per_device)
+
+    with Status("[bold cyan]Analisando com IA...[/bold cyan]", spinner="dots", console=console):
+        result = analyze(context, question)
+
+    if result:
+        console.print(
+            Panel(
+                Markdown(result),
+                title=f"[bold cyan]{title}[/bold cyan]",
+                border_style="cyan",
+                padding=(1, 2),
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Comandos
+# ---------------------------------------------------------------------------
+
+@app.command()
+def setup(
+    key: str = typer.Option(None, "--key", "-k", help="API key do DeepSeek"),
+):
+    """Configura a API key do DeepSeek para análises com IA."""
+    if key is None:
+        key = typer.prompt("Cole sua API key do DeepSeek", hide_input=True)
+    key = key.strip()
+    if not key:
+        console.print("[red]API key inválida.[/red]")
+        raise typer.Exit(1)
+    save_api_key(key)
+    console.print("[green]✓ API key salva com segurança em ~/.netwatch/config.json[/green]")
+
+
 @app.command()
 def status(
     t: bool = typer.Option(False, "-t", help="Modo contínuo"),
     fast: bool = typer.Option(False, "--fast", "-f", help="Scan rápido sem portas"),
     full: bool = typer.Option(False, "--full", "-F", help="Inclui tabela ARP + DHCP leases + multi-subnets"),
+    ai: bool = typer.Option(True, "--ai/--no-ai", help="Exibe análise de segurança com IA"),
 ):
     """Exibe status geral da rede."""
 
@@ -128,20 +187,29 @@ def status(
         console.print("[bold]Escaneando dispositivos...[/bold]")
         devices, network = scan_devices(port_scan=not fast, scan_all_subnets=full, use_dhcp_leases=full)
         scan_type = "full" if full else ("fast" if fast else "normal")
+        diff = diff_with_last_scan(devices)
         save_scan(devices, network, scan_type)
         start_spoofing(devices, gateway_ip, interface)
         start_sniff(local_ip, interface)
 
+        # Análise IA antes de entrar no live display
+        if ai:
+            console.rule("[dim]IA[/dim]")
+            _run_ai_analysis(
+                devices,
+                bandwidth=get_bandwidth(),
+                diff=diff,
+                title="🤖 Análise Inicial — DeepSeek",
+            )
+
         def refresh_devices():
             nonlocal devices
-            use_port_scan = not fast
-            use_full = full
             while True:
                 time.sleep(30)
                 new_devices, new_network = scan_devices(
-                    port_scan=use_port_scan,
-                    scan_all_subnets=use_full,
-                    use_dhcp_leases=use_full,
+                    port_scan=not fast,
+                    scan_all_subnets=full,
+                    use_dhcp_leases=full,
                 )
                 save_scan(new_devices, new_network, scan_type)
                 devices = new_devices
@@ -164,8 +232,18 @@ def status(
     else:
         devices, network = scan_devices(port_scan=not fast, scan_all_subnets=full, use_dhcp_leases=full)
         scan_type = "full" if full else ("fast" if fast else "normal")
+        diff = diff_with_last_scan(devices)
         save_scan(devices, network, scan_type)
         console.print(build_layout(devices))
+
+        if ai:
+            console.rule("[dim]IA[/dim]")
+            _run_ai_analysis(
+                devices,
+                bandwidth=get_bandwidth(),
+                diff=diff,
+                title="🤖 Análise de Segurança — DeepSeek",
+            )
 
 
 @app.command()
@@ -174,8 +252,9 @@ def scan(
     no_port_scan: bool = typer.Option(False, "--no-port-scan", help="Não faz scan de portas"),
     full: bool = typer.Option(False, "--full", "-F", help="Escaneia múltiplas sub-redes/VLANs + DHCP"),
     diff: bool = typer.Option(True, "--diff/--no-diff", help="Mostra diff vs último scan"),
+    ai: bool = typer.Option(True, "--ai/--no-ai", help="Exibe análise de segurança com IA"),
 ):
-    """Lista todos os dispositivos na rede e compara com o scan anterior."""
+    """Lista todos os dispositivos na rede e analisa com IA."""
     devices, detected_network = scan_devices(
         network,
         port_scan=not no_port_scan,
@@ -183,7 +262,7 @@ def scan(
         use_dhcp_leases=full,
     )
 
-    # Diff ANTES de salvar (compara com o scan anterior, não consigo mesmo)
+    # Diff ANTES de salvar (compara com o scan anterior)
     changes = diff_with_last_scan(devices) if diff else None
 
     scan_type = "full" if full else ("normal" if not no_port_scan else "fast")
@@ -212,10 +291,45 @@ def scan(
 
     console.print(table)
 
-    # Exibe diff após a tabela principal
     if changes is not None:
         console.rule("[dim]Comparação com último scan[/dim]")
         _print_diff(changes)
+
+    if ai:
+        console.rule("[dim]IA[/dim]")
+        _run_ai_analysis(
+            devices,
+            diff=changes,
+            title="🤖 Análise de Segurança — DeepSeek",
+        )
+
+
+@app.command()
+def ask(
+    question: str = typer.Argument(..., help="Pergunta sobre a rede (ex: 'tem algum dispositivo suspeito?')"),
+    fast: bool = typer.Option(True, "--fast/--full-scan", help="Usa scan rápido (padrão) ou completo"),
+):
+    """Pergunta livre para a IA sobre o estado atual da rede."""
+    if not is_configured():
+        console.print(
+            "[red]IA não configurada.[/red] Execute [bold]netwatch setup[/bold] primeiro."
+        )
+        raise typer.Exit(1)
+
+    console.print("[bold]Coletando dados da rede...[/bold]")
+    devices, network = scan_devices(port_scan=not fast, use_dhcp_leases=True)
+    bandwidth = get_bandwidth()
+    diff = diff_with_last_scan(devices)
+    save_scan(devices, network, "fast" if fast else "normal")
+
+    console.rule("[dim]IA[/dim]")
+    _run_ai_analysis(
+        devices,
+        bandwidth=bandwidth,
+        diff=diff,
+        question=question,
+        title=f"🤖 DeepSeek — \"{question[:60]}\"",
+    )
 
 
 @app.command()
@@ -271,7 +385,6 @@ def history(
     table.add_column("Dispositivos", justify="right", style="green")
 
     for s in scans:
-        # Converte ISO timestamp para formato local legível
         try:
             ts = datetime.fromisoformat(s["timestamp"]).astimezone().strftime("%Y-%m-%d %H:%M:%S")
         except Exception:
@@ -307,13 +420,13 @@ def known(
     table.add_column("Última vez", style="dim")
     table.add_column("Vezes", justify="right", style="green")
 
-    for d in devices:
-        def fmt_ts(ts: str) -> str:
-            try:
-                return datetime.fromisoformat(ts).astimezone().strftime("%Y-%m-%d %H:%M")
-            except Exception:
-                return ts
+    def fmt_ts(ts: str) -> str:
+        try:
+            return datetime.fromisoformat(ts).astimezone().strftime("%Y-%m-%d %H:%M")
+        except Exception:
+            return ts
 
+    for d in devices:
         table.add_row(
             d["mac"],
             d["ip"] or "-",

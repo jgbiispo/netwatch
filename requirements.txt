@@ -4,3 +4,4 @@ python-nmap
 mac-vendor-lookup
 rich
 typer
+openai
