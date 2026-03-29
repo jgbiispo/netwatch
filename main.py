@@ -14,18 +14,19 @@ def status():
     console.print("[bold green]iniciando monitoramento...[/bold green]")
 
 @app.command()
-def scan(network: str = "192.168.1.0/24"):
+def scan(network: str = None):
     """Lista todos os dispositivos na rede."""
-    console.print(f"[bold]Escaneando {network}...[/bold]")
-    
-    devices = scan_devices(network)
+    devices, detected_network = scan_devices(network)
+
+    console.print(f"[bold]Escaneando {detected_network}...[/bold]")
 
     table = Table(title="Dispositivos na rede")
     table.add_column("IP", style="cyan")
     table.add_column("MAC", style="magenta")
+    table.add_column("Fabricante", style="yellow")
 
     for device in devices:
-        table.add_row(device["ip"], device["mac"])
+        table.add_row(device["ip"], device["mac"], device["vendor"])
 
     console.print(table)
 
