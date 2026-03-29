@@ -19,7 +19,11 @@ app = typer.Typer()
 console = Console()
 
 @app.command()
-def status(t: bool = typer.Option(False, "-t", help="Modo contínuo")):
+def status(
+    t: bool = typer.Option(False, "-t", help="Modo contínuo"),
+    fast: bool = typer.Option(False, "--fast", "-f", help="Scan rápido sem portas"),
+    full: bool = typer.Option(False, "--full", "-F", help="Inclui tabela ARP + DHCP leases + multi-subnets"),
+):
     """Exibe status geral da rede."""
 
     def build_layout(devices: list, per_device: dict = {}):
@@ -30,7 +34,7 @@ def status(t: bool = typer.Option(False, "-t", help="Modo contínuo")):
         table = Table(title="Dispositivos")
         table.add_column("IP", style="cyan")
         table.add_column("MAC", style="magenta")
-        table.add_column("Fabricante", style="yellow")
+        table.add_column("Tipo/Fabricante", style="yellow")
         table.add_column("Upload", style="red")
         table.add_column("Download", style="green")
 
@@ -55,7 +59,7 @@ def status(t: bool = typer.Option(False, "-t", help="Modo contínuo")):
         )
 
         return Columns([table, band_panel])
-    
+
     if t:
         interface = get_bandwidth()["interface"]
         gateway_ip = "192.168.100.1"
@@ -66,16 +70,18 @@ def status(t: bool = typer.Option(False, "-t", help="Modo contínuo")):
                 break
 
         console.print("[bold]Escaneando dispositivos...[/bold]")
-        devices, _ = scan_devices()
+        devices, _ = scan_devices(port_scan=not fast, scan_all_subnets=full, use_dhcp_leases=full)
         start_spoofing(devices, gateway_ip, interface)
         start_sniff(local_ip, interface)
 
         # thread que atualiza dispositivos a cada 30s em background
         def refresh_devices():
             nonlocal devices
+            use_port_scan = not fast
+            use_full = full
             while True:
                 time.sleep(10)
-                new_devices, _ = scan_devices()
+                new_devices, _ = scan_devices(port_scan=use_port_scan, scan_all_subnets=use_full, use_dhcp_leases=use_full)
                 devices = new_devices
                 start_spoofing(devices, gateway_ip, interface)
 
@@ -95,23 +101,43 @@ def status(t: bool = typer.Option(False, "-t", help="Modo contínuo")):
             stop_spoofing()
             console.print("[bold red]Spoofing encerrado, ARP restaurado.[/bold red]")
     else:
-        devices, _ = scan_devices()
+        devices, _ = scan_devices(port_scan=not fast, scan_all_subnets=full, use_dhcp_leases=full)
         console.print(build_layout(devices))
 
 @app.command()
-def scan(network: str = None):
+def scan(
+    network: str = None,
+    no_port_scan: bool = typer.Option(False, "--no-port-scan", help="Não faz scan de portas"),
+    full: bool = typer.Option(False, "--full", "-F", help="Escaneia múltiplas sub-redes/VLANs + DHCP"),
+):
     """Lista todos os dispositivos na rede."""
-    devices, detected_network = scan_devices(network)
+    devices, detected_network = scan_devices(
+        network,
+        port_scan=not no_port_scan,
+        scan_all_subnets=full,
+        use_dhcp_leases=full,
+    )
 
     console.print(f"[bold]Escaneando {detected_network}...[/bold]")
+    if full:
+        console.print("[bold yellow]Scan completo: ARP + tabela ARP + DHCP leases + multi-subnets[/bold yellow]")
 
     table = Table(title="Dispositivos na rede")
     table.add_column("IP", style="cyan")
     table.add_column("MAC", style="magenta")
-    table.add_column("Fabricante", style="yellow")
+    table.add_column("Fabricante/Tipo", style="yellow")
+    table.add_column("Origem", style="blue")
 
     for device in devices:
-        table.add_row(device["ip"], device["mac"], device["vendor"])
+        source = device.get("source", "scan")
+        source_icon = {
+            "local": "[local]",
+            "arp-table": "[ARP]",
+            "arp-scan": "[scan]",
+            "multi-scan": "[multi]",
+            "dhcp-lease": "[DHCP]",
+        }.get(source, "[?]")
+        table.add_row(device["ip"], device["mac"], device["vendor"], source_icon)
 
     console.print(table)
 
