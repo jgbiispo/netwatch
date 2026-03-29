@@ -1,7 +1,7 @@
 import typer
 import time
+import socket
 import psutil
-import signal
 import threading
 
 from collector.devices import scan_devices
@@ -17,6 +17,27 @@ from collector.spoof import start_spoofing, stop_spoofing
 
 app = typer.Typer()
 console = Console()
+
+
+def detect_gateway() -> str:
+    """
+    Detecta o gateway padrão da rede via tabela de roteamento.
+    Fix #4: substitui o gateway hardcoded.
+    """
+    try:
+        import subprocess
+        result = subprocess.run(
+            ["ip", "route", "show", "default"],
+            capture_output=True, text=True, timeout=5,
+        )
+        for line in result.stdout.splitlines():
+            parts = line.split()
+            if "via" in parts:
+                return parts[parts.index("via") + 1]
+    except Exception:
+        pass
+    return "192.168.1.1"  # fallback genérico
+
 
 @app.command()
 def status(
@@ -62,10 +83,11 @@ def status(
 
     if t:
         interface = get_bandwidth()["interface"]
-        gateway_ip = "192.168.100.1"
+        gateway_ip = detect_gateway()  # Fix #4: gateway detectado automaticamente
 
+        local_ip = None
         for addr in psutil.net_if_addrs().get(interface, []):
-            if addr.family == 2:
+            if addr.family == socket.AF_INET:  # Fix #13: magic number
                 local_ip = addr.address
                 break
 
@@ -80,9 +102,14 @@ def status(
             use_port_scan = not fast
             use_full = full
             while True:
-                time.sleep(10)
-                new_devices, _ = scan_devices(port_scan=use_port_scan, scan_all_subnets=use_full, use_dhcp_leases=use_full)
+                time.sleep(30)
+                new_devices, _ = scan_devices(
+                    port_scan=use_port_scan,
+                    scan_all_subnets=use_full,
+                    use_dhcp_leases=use_full,
+                )
                 devices = new_devices
+                # Fix #3: start_spoofing agora para a thread anterior antes de criar nova
                 start_spoofing(devices, gateway_ip, interface)
 
         thread = threading.Thread(target=refresh_devices, daemon=True)
@@ -90,7 +117,6 @@ def status(
 
         console.print("[bold yellow]⚠ ARP Spoofing ativo[/bold yellow]")
         console.print("[bold]Modo contínuo ativado... (Ctrl+C para sair)[/bold]")
-        time.sleep(1)
 
         try:
             with Live(refresh_per_second=4) as live:
@@ -103,6 +129,7 @@ def status(
     else:
         devices, _ = scan_devices(port_scan=not fast, scan_all_subnets=full, use_dhcp_leases=full)
         console.print(build_layout(devices))
+
 
 @app.command()
 def scan(
@@ -141,11 +168,12 @@ def scan(
 
     console.print(table)
 
+
 @app.command()
 def bandwidth():
     """Exibe o uso de banda em tempo real."""
     console.print("[bold]Medindo uso de banda...[/bold]")
-    
+
     data = get_bandwidth()
 
     upload_kb = data["upload"] / 1024
@@ -154,6 +182,7 @@ def bandwidth():
     console.print(f"Interface: [cyan]{data['interface']}[/cyan]")
     console.print(f"Upload:    [red]{upload_kb:.2f} KB/s[/red]")
     console.print(f"Download:  [green]{download_kb:.2f} KB/s[/green]")
+
 
 @app.command()
 def monitor():
@@ -173,6 +202,7 @@ def monitor():
                 title="[bold]Monitoramento de Banda[/bold]",
             )
             live.update(panel)
+
 
 if __name__ == "__main__":
     app()

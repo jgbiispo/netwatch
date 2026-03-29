@@ -1,0 +1,6 @@
+scapy
+psutil
+python-nmap
+mac-vendor-lookup
+rich
+typer
