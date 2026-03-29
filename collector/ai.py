@@ -415,3 +415,93 @@ def analyze_with_threshold(
     context = build_context(devices, bandwidth, diff, per_device, gateway_ip)
     result = analyze(context, question)
     return result, True
+
+
+# ---------------------------------------------------------------------------
+# Chat multi-turn
+# ---------------------------------------------------------------------------
+
+# Máximo de turnos (par usuário + assistente) mantidos no histórico.
+# Ao ultrapassar, os mais antigos são descartados preservando o system message.
+MAX_CHAT_HISTORY = 10
+
+CHAT_SYSTEM_PROMPT = """\
+Você é um assistente especialista em segurança de redes integrado ao NetWatch.
+O usuário está monitorando a própria rede local e pode fazer perguntas em linguagem natural.
+
+O contexto atual da rede (snapshot mais recente) será fornecido na primeira mensagem.
+Use APENAS as informações presentes no contexto — nunca invente dados.
+
+REGRAS:
+1. Responda sempre em português brasileiro.
+2. Se a pergunta é sobre a rede: cite IPs, MACs e portas específicas quando relevante.
+3. Se não houver dados suficientes no contexto para responder: diga isso claramente.
+4. Seja conciso — máximo 200 palavras por resposta no chat.
+5. Para alertas de segurança, use 🔴 (crítico) ou 🟡 (atenção) para destacar.
+"""
+
+
+def chat_turn(
+    messages: list,
+    question: str,
+    context: str,
+) -> tuple[str, list]:
+    """
+    Executa um turno da conversa multi-turn com o DeepSeek.
+
+    Na primeira chamada (messages=[]), inicializa o histórico injetando o
+    contexto da rede como parte do system prompt. Em turnos subsequentes,
+    apenas appenda a nova pergunta e obtém a resposta.
+
+    Args:
+        messages: Histórico acumulado ({ role, content } dicts). Passa [] na 1ª vez.
+        question: Pergunta do usuário neste turno.
+        context: Snapshot atual da rede (de build_context). Usado apenas no 1º turno.
+
+    Returns:
+        (resposta_str, messages_atualizado)
+    """
+    key = get_api_key()
+    if not key:
+        return "⚠ IA não configurada. Execute `netwatch setup` primeiro.", messages
+
+    try:
+        from openai import OpenAI
+        client = OpenAI(api_key=key, base_url=DEEPSEEK_BASE_URL)
+
+        # Primeira mensagem: inicializa com system + contexto da rede
+        if not messages:
+            system_content = (
+                CHAT_SYSTEM_PROMPT
+                + "\n\n=== CONTEXTO DA REDE (atualizado em cada /rescan) ===\n"
+                + context
+            )
+            messages = [{"role": "system", "content": system_content}]
+
+        # Adiciona pergunta do usuário
+        messages.append({"role": "user", "content": question})
+
+        response = client.chat.completions.create(
+            model=DEEPSEEK_MODEL,
+            messages=messages,
+            temperature=0,      # determinístico como no modo análise
+            max_tokens=600,     # respostas concisas no chat
+        )
+
+        answer = (response.choices[0].message.content or "").strip()
+        if not answer:
+            answer = "Não consegui gerar uma resposta. Tente reformular a pergunta."
+
+        messages.append({"role": "assistant", "content": answer})
+
+        # Poda o histórico: preserva system message + últimos MAX_CHAT_HISTORY turnos
+        max_msgs = 1 + MAX_CHAT_HISTORY * 2  # system + N pares (user+assistant)
+        if len(messages) > max_msgs:
+            messages = [messages[0]] + messages[-(MAX_CHAT_HISTORY * 2):]
+
+        return answer, messages
+
+    except Exception as e:
+        error_msg = f"[Erro na IA: {e}]"
+        # Não adiciona o erro ao histórico para não poluir o contexto
+        return error_msg, messages

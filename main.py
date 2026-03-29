@@ -28,6 +28,8 @@ from rich.columns import Columns
 from rich.markdown import Markdown
 from rich.spinner import Spinner
 from rich.status import Status
+from rich.prompt import Prompt
+from rich.rule import Rule
 from collector.spoof import start_spoofing, stop_spoofing
 
 
@@ -472,6 +474,228 @@ def known(
         )
 
     console.print(table)
+
+
+# ---------------------------------------------------------------------------
+# Comando: chat
+# ---------------------------------------------------------------------------
+
+@app.command()
+def chat(
+    fast: bool = typer.Option(True, "--fast/--full-scan", help="Scan rápido (padrão) ou completo"),
+):
+    """ Modo chat interativo com a IA — perguntas em linguagem natural sobre a rede."""
+    from collector.ai import chat_turn, build_context
+
+    if not is_configured():
+        console.print(
+            "[red]IA não configurada.[/red] Execute [bold]netwatch setup[/bold] primeiro."
+        )
+        raise typer.Exit(1)
+
+    console.print(
+        Panel.fit(
+            "[bold cyan]🤖 NetWatch Chat[/bold cyan]\n"
+            "[dim]Pergunte sobre sua rede em linguagem natural.[/dim]\n\n"
+            "[dim]  [bold]/rescan[/bold]  — Atualiza os dados da rede[/dim]\n"
+            "[dim]  [bold]/devices[/bold] — Exibe tabela de dispositivos[/dim]\n"
+            "[dim]  [bold]/clear[/bold]   — Limpa o histórico da conversa[/dim]\n"
+            "[dim]  [bold]/quit[/bold]    — Encerra o chat[/dim]",
+            border_style="cyan",
+            padding=(1, 2),
+        )
+    )
+
+    gateway = detect_gateway()
+
+    def _do_scan() -> tuple[list, str, str]:
+        """Escaneia a rede e retorna (devices_enriquecidos, context, network)."""
+        with Status("[bold]Escaneando rede...[/bold]", spinner="dots", console=console):
+            devices, network = scan_devices(port_scan=not fast, use_dhcp_leases=True)
+            diff = diff_with_last_scan(devices)
+            save_scan(devices, network, "fast" if fast else "normal")
+            enriched = _enrich_devices_for_ai(devices)
+            bw = get_bandwidth()
+            ctx = build_context(enriched, bw, diff, gateway_ip=gateway)
+        console.print(
+            f"[green]✓[/green] [bold]{len(devices)}[/bold] dispositivos encontrados "
+            f"em [cyan]{network}[/cyan]"
+        )
+        return enriched, ctx, network
+
+    def _show_devices(devices: list) -> None:
+        """Exibe tabela compacta de dispositivos no chat."""
+        table = Table(title="Dispositivos na rede", show_header=True, header_style="bold cyan")
+        table.add_column("IP",            style="cyan")
+        table.add_column("Fabricante/Tipo", style="yellow")
+        table.add_column("Visto",          style="green", justify="right")
+        for d in devices:
+            times = d.get("times_seen", 0)
+            hist = f"{times}x" if times > 0 else "novo"
+            table.add_row(d["ip"], d.get("vendor", "?")[:40], hist)
+        console.print(table)
+
+    enriched, context, network = _do_scan()
+    messages: list = []
+    turn = 0
+
+    while True:
+        try:
+            question = Prompt.ask("\n[bold cyan]você[/bold cyan]")
+        except (KeyboardInterrupt, EOFError):
+            console.print("\n[dim]Encerrando chat...[/dim]")
+            break
+
+        q = question.strip()
+        if not q:
+            continue
+
+        # Comandos especiais
+        if q.lower() in ("/quit", "/exit", "/q"):
+            console.print("[dim]Chat encerrado. Até logo![/dim]")
+            break
+
+        if q.lower() == "/rescan":
+            enriched, context, network = _do_scan()
+            messages = []   # reseta histórico com novo contexto
+            turn = 0
+            console.print("[dim]Histórico da conversa resetado com dados frescos.[/dim]")
+            continue
+
+        if q.lower() == "/devices":
+            _show_devices(enriched)
+            continue
+
+        if q.lower() == "/clear":
+            messages = []
+            turn = 0
+            console.print("[dim]Histórico da conversa limpo.[/dim]")
+            continue
+
+        if q.lower() == "/help":
+            console.print(
+                "[bold]Comandos disponíveis:[/bold]\n"
+                "  /rescan  — Refaz o scan e atualiza contexto da IA\n"
+                "  /devices — Mostra tabela de dispositivos\n"
+                "  /clear   — Limpa histórico sem rescanear\n"
+                "  /quit    — Encerra o chat\n"
+                "\n[bold]Exemplos de perguntas:[/bold]\n"
+                "  'tem algum dispositivo suspeito?'\n"
+                "  'quem provavelmente é o 192.168.1.53?'\n"
+                "  'algum dispositivo novo entrou?'\n"
+                "  'explica o que é ARP spoofing'"
+            )
+            continue
+
+        # Chama a IA
+        turn += 1
+        with Status(
+            f"[bold cyan]Pensando turno {turn}...[/bold cyan]",
+            spinner="dots",
+            console=console,
+        ):
+            answer, messages = chat_turn(messages, q, context)
+
+        console.print(
+            Panel(
+                Markdown(answer),
+                title="[bold cyan]🤖 IA[/bold cyan]",
+                border_style="cyan",
+                padding=(0, 2),
+            )
+        )
+
+
+# ---------------------------------------------------------------------------
+# Comando: watch
+# ---------------------------------------------------------------------------
+
+@app.command()
+def watch(
+    interval: int   = typer.Option(60,    "--interval",   "-i", help="Segundos entre scans"),
+    threshold: float = typer.Option(5000., "--threshold",  "-T", help="Limite de banda KB/s para alertas"),
+    notify: bool    = typer.Option(False, "--notify",           help="Notificações desktop via notify-send"),
+    ai: bool        = typer.Option(False, "--ai/--no-ai",        help="Chama IA quando um alerta crítico ocorrer"),
+    fast: bool      = typer.Option(True,  "--fast/--full-scan",  help="Scan rápido (padrão) ou completo"),
+):
+    """Monitor contínuo com alertas de segurança em tempo real."""
+    from collector.alerts import detect_alerts, send_desktop_notification, AlertLevel
+
+    gateway = detect_gateway()
+
+    console.print(
+        Panel.fit(
+            f"[bold yellow]👁️  NetWatch Watch[/bold yellow]\n"
+            f"[dim]Intervalo: {interval}s · Threshold banda: {threshold:.0f} KB/s · "
+            f"Gateway: {gateway}[/dim]\n"
+            f"[dim]IA em alertas críticos: {'[green]ativa[/green]' if ai else '[red]desativada[/red]'} · "
+            f"Notificações desktop: {'[green]ativa[/green]' if notify else '[red]desativada[/red]'}[/dim]",
+            border_style="yellow",
+            padding=(1, 2),
+        )
+    )
+
+    # Scan inicial
+    with Status("[bold]Scan inicial...[/bold]", spinner="dots", console=console):
+        prev_devices, network = scan_devices(port_scan=not fast, use_dhcp_leases=True)
+        save_scan(prev_devices, network, "fast" if fast else "normal")
+
+    console.print(
+        f"[green]✓[/green] [bold]{len(prev_devices)}[/bold] dispositivos rastreados. "
+        f"Monitorando [cyan]{network}[/cyan]...\n"
+        "[dim](Ctrl+C para parar)[/dim]\n"
+    )
+
+    scan_count = 0
+    alert_count = 0
+
+    try:
+        while True:
+            time.sleep(interval)
+            scan_count += 1
+            ts = datetime.now().strftime("%H:%M:%S")
+
+            curr_devices, _ = scan_devices(port_scan=not fast, use_dhcp_leases=True)
+            bw = get_bandwidth()
+            save_scan(curr_devices, network, "fast" if fast else "normal")
+
+            enriched = _enrich_devices_for_ai(curr_devices)
+            alerts = detect_alerts(prev_devices, enriched, bw, gateway, threshold)
+
+            if alerts:
+                console.print(Rule(f"[dim]{ts} — Scan #{scan_count} — {len(alerts)} alerta(s)[/dim]"))
+                for alert in alerts:
+                    alert_count += 1
+                    console.print(
+                        f"{alert.icon} [{alert.rich_color}]{alert.title}[/{alert.rich_color}]\n"
+                        f"   [dim]{alert.detail}[/dim]"
+                    )
+                    if notify:
+                        send_desktop_notification(alert)
+
+                # Chama IA apenas se --ai e houver alerta crítico
+                if ai and any(a.level == AlertLevel.CRITICAL for a in alerts):
+                    console.print()
+                    _run_ai_analysis(
+                        enriched,
+                        bandwidth=bw,
+                        diff=diff_with_last_scan(curr_devices),
+                        gateway_ip=gateway,
+                        title=f"🤖 Análise — Scan #{scan_count}",
+                    )
+            else:
+                console.print(
+                    f"[dim][{ts}] Scan #{scan_count} — sem anomalias — "
+                    f"{len(curr_devices)} dispositivos[/dim]"
+                )
+
+            prev_devices = curr_devices
+
+    except KeyboardInterrupt:
+        console.print(
+            f"\n[bold]Monitor encerrado.[/bold] "
+            f"{scan_count} scan(s) realizados, {alert_count} alerta(s) emitidos."
+        )
 
 
 if __name__ == "__main__":
