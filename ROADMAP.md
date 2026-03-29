@@ -107,7 +107,7 @@ Ideias e melhorias além das correções actuais.
 
 - [ ] **Exportar resultados** para JSON/CSV (`netwatch scan --output devices.json`)
 - [ ] **Alertas de novos dispositivos** — notificar quando um dispositivo desconhecido entra na rede
-- [ ] **Histórico de dispositivos** — persistir lista de devices conhecidos em disco
+- [x] **Histórico de dispositivos** ✅ — SQLite em `~/.netwatch/history.db` com scans, `scan_devices` e `known_devices`; novos comandos `history` e `known`; diff automático no `scan`
 - [ ] **Filtros por tipo** — `netwatch scan --filter windows` / `--filter iot`
 - [ ] **Relatório HTML** — gerar relatório visual dos dispositivos encontrados
 - [ ] **Suporte IPv6** — detectar dispositivos em redes dual-stack
@@ -121,4 +121,6 @@ Ideias e melhorias além das correções actuais.
 
 ### 2026-03-29
 - Revisão completa do código — identificados 15 pontos de melhoria (5 críticos, 5 performance, 5 qualidade)
+- Todos os 15 fixes aplicados: paralelismo, race condition, gateway dinâmico, etc.
 - Criado este documento de roadmap
+- **Implementado histórico SQLite**: `collector/history.py` + comandos `history`, `known` e diff automático no `scan`
