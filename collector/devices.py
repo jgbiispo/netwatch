@@ -1,3 +1,5 @@
+import asyncio
+import inspect
 import psutil
 import ipaddress
 import socket
@@ -352,7 +354,16 @@ def identify_device(ip: str, mac_addr: str, mac_lookup: MacLookup) -> tuple:
     # 1. Tenta identificar pelo MAC
     vendor = "Desconhecido"
     try:
-        vendor = mac_lookup.lookup(mac_addr)
+        result = mac_lookup.lookup(mac_addr)
+        # Versões novas da lib retornam coroutine (AsyncMacLookup).
+        # Criamos um loop isolado para não conflitar com threads do executor.
+        if inspect.isawaitable(result):
+            loop = asyncio.new_event_loop()
+            try:
+                result = loop.run_until_complete(result)
+            finally:
+                loop.close()
+        vendor = result
         if vendor and vendor != "Desconhecido":
             return vendor, []
     except Exception:
